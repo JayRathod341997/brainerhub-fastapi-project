@@ -15,7 +15,7 @@ A high-performance API for bulk importing employee data from Excel/CSV files int
 
 - Python 3.8+
 - PostgreSQL 12+
-- Poetry (recommended) or pip
+- pip
 
 ## Setup
 
