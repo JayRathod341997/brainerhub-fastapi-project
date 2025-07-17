@@ -2,12 +2,13 @@ from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
 import os
 from pathlib import Path
-from app.schemas import ImportResult  # Add this import
-from app import crud
 from app.database import get_db
 from app.utils.file_processor import process_employee_file
+from app.crud import bulk_import_data
+from app.schemas import ImportResult
 
 router = APIRouter()
+
 @router.post("/upload/", response_model=ImportResult)
 async def upload_file(
     file: UploadFile = File(...),
@@ -16,41 +17,35 @@ async def upload_file(
     try:
         # Validate file type
         if not (file.filename.endswith('.xlsx') or file.filename.endswith('.csv')):
-            raise HTTPException(
-                status_code=400,
-                detail="Only .xlsx and .csv files are supported"
-            )
+            raise HTTPException(400, "Only .xlsx and .csv files are supported")
         
         # Save file temporarily
         upload_dir = Path("uploads")
         upload_dir.mkdir(exist_ok=True)
         file_path = upload_dir / file.filename
         
-        with open(file_path, "wb") as buffer:
-            buffer.write(await file.read())
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
         
         try:
-            # Process file and get manager IDs
-            employees, manager_ids = process_employee_file(str(file_path))
+            # Process file
+            company_data, employee_data = process_employee_file(str(file_path))
             
-            # Import to database
-            count = crud.create_employees(db, employees, manager_ids)
+            # Import data
+            count = bulk_import_data(db, company_data, employee_data)
             
             return ImportResult(
                 filename=file.filename,
                 employee_count=count,
                 status="success"
             )
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            raise HTTPException(422, detail=str(e))
         finally:
             if file_path.exists():
-                file_path.unlink()
+                os.unlink(file_path)
                 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error: {str(e)}"
-        )
+        raise HTTPException(500, detail=f"Internal server error: {str(e)}")

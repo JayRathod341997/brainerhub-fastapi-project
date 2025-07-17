@@ -1,122 +1,122 @@
 from sqlalchemy.orm import Session
 from app.models import Company, Employee
 from app.schemas import EmployeeCreate
-from typing import List
+from typing import List, Dict
 from sqlalchemy.exc import IntegrityError
-from typing import List, Tuple, Set
+from sqlalchemy import text
 
-def get_or_create_company(db: Session, name: str):
-    company = db.query(Company).filter(Company.name == name).first()
-    if not company:
-        company = Company(name=name)
-        db.add(company)
-        db.commit()
-        db.refresh(company)
-    return company
-
-def create_employees(db: Session, employees: List[EmployeeCreate], manager_ids: Set[int]):
+def bulk_import_data(db: Session, company_data: List[Dict], employee_data: List[Dict]):
+    # Start transaction
+    transaction = db.begin()
+    
     try:
-        # First pass: Create all companies
-        company_names = {e.company_name for e in employees}
-        company_map = {}
+        # Bulk insert companies
+        if company_data:
+            db.execute(
+                text("""
+                    INSERT INTO companies (name)
+                    VALUES (:name)
+                    ON CONFLICT (name) DO NOTHING
+                """),
+                company_data
+            )
+            db.flush()  # Ensure companies are available for querying
         
-        for name in company_names:
-            company = db.query(Company).filter(Company.name == name).first()
-            if not company:
-                company = Company(name=name)
-                db.add(company)
-                db.commit()
-                db.refresh(company)
-            company_map[name] = company.id
+        # Get company name to ID mapping
+        company_names = tuple({e['company_name'] for e in employee_data})
+        result = db.execute(
+            text("SELECT id, name FROM companies WHERE name IN :names"),
+            {"names": company_names}
+        ).fetchall()
         
-        # Second pass: Create employees without managers first
-        employee_map = {}
-        non_manager_employees = []
+        # Convert result to proper dictionary
+        company_map = {name: id for id, name in result}
         
-        for emp in employees:
-            if emp.manager_id is None or emp.manager_id not in manager_ids:
-                db_emp = Employee(
-                    first_name=emp.first_name,
-                    last_name=emp.last_name,
-                    phone_number=emp.phone_number,
-                    salary=emp.salary,
-                    manager_id=emp.manager_id,
-                    department_id=emp.department_id,
-                    company_id=company_map[emp.company_name]
-                )
-                non_manager_employees.append(db_emp)
+        # Prepare final employee data
+        final_employee_data = []
+        for emp in employee_data:
+            company_id = company_map.get(emp['company_name'])
+            if not company_id:
+                raise ValueError(f"Company {emp['company_name']} not found")
+            
+            final_employee_data.append({
+                "first_name": emp["first_name"],
+                "last_name": emp["last_name"],
+                "phone_number": emp["phone_number"],
+                "salary": emp["salary"],
+                "manager_id": emp["manager_id"],
+                "department_id": emp["department_id"],
+                "company_id": company_id
+            })
         
-        db.bulk_save_objects(non_manager_employees)
-        db.commit()
+        # Bulk insert employees
+        if final_employee_data:
+            db.execute(
+                text("""
+                    INSERT INTO employees 
+                    (first_name, last_name, phone_number, salary, manager_id, department_id, company_id)
+                    VALUES 
+                    (:first_name, :last_name, :phone_number, :salary, :manager_id, :department_id, :company_id)
+                """),
+                final_employee_data
+            )
         
-        # Get IDs of newly created employees
-        for emp in non_manager_employees:
-            db.refresh(emp)
-            employee_map[(emp.first_name, emp.last_name)] = emp.id
-        
-        # Third pass: Create employees with managers
-        manager_employees = []
-        
-        for emp in employees:
-            if emp.manager_id and emp.manager_id in manager_ids:
-                # Check if manager exists in database
-                manager_exists = db.query(Employee.id).filter(
-                    Employee.id == emp.manager_id
-                ).first()
-                
-                if not manager_exists:
-                    raise ValueError(f"Manager ID {emp.manager_id} does not exist")
-                
-                db_emp = Employee(
-                    first_name=emp.first_name,
-                    last_name=emp.last_name,
-                    phone_number=emp.phone_number,
-                    salary=emp.salary,
-                    manager_id=emp.manager_id,
-                    department_id=emp.department_id,
-                    company_id=company_map[emp.company_name]
-                )
-                manager_employees.append(db_emp)
-        
-        db.bulk_save_objects(manager_employees)
-        db.commit()
-        
-        return len(non_manager_employees) + len(manager_employees)
-        
-    except IntegrityError as e:
-        db.rollback()
-        raise ValueError(f"Database integrity error: {str(e)}")
+        transaction.commit()
+        return len(final_employee_data)
+    
     except Exception as e:
-        db.rollback()
-        raise ValueError(f"Unexpected error: {str(e)}")
-    # First get all unique company names
-    company_names = {e.company_name for e in employees}
+        transaction.rollback()
+        raise ValueError(f"Database operation failed: {str(e)}")
+    # Start transaction
+    transaction = db.begin()
     
-    # Create company mapping (name -> id)
-    company_map = {}
-    for name in company_names:
-        company = db.query(Company).filter(Company.name == name).first()
-        if not company:
-            company = Company(name=name)
-            db.add(company)
-            db.commit()
-            db.refresh(company)
-        company_map[name] = company.id
+    try:
+        # Bulk insert companies and get their IDs
+        if company_data:
+            db.execute(
+                text("""
+                    INSERT INTO companies (name)
+                    VALUES (:name)
+                    ON CONFLICT (name) DO NOTHING
+                """),
+                company_data
+            )
+        
+        # Get company name to ID mapping
+        company_map = {c['name']: c['id'] for c in db.execute(
+            text("SELECT id, name FROM companies WHERE name IN :names"),
+            {"names": tuple({e['company_name'] for e in employee_data})}
+        ).fetchall()}
+        
+        # Prepare final employee data with company IDs
+        final_employee_data = []
+        for emp in employee_data:
+            final_emp = {
+                "first_name": emp["first_name"],
+                "last_name": emp["last_name"],
+                "phone_number": emp["phone_number"],
+                "salary": emp["salary"],
+                "manager_id": emp["manager_id"],
+                "department_id": emp["department_id"],
+                "company_id": company_map[emp["company_name"]]
+            }
+            final_employee_data.append(final_emp)
+        
+        # Bulk insert employees
+        if final_employee_data:
+            db.execute(
+                text("""
+                    INSERT INTO employees 
+                    (first_name, last_name, phone_number, salary, manager_id, department_id, company_id)
+                    VALUES 
+                    (:first_name, :last_name, :phone_number, :salary, :manager_id, :department_id, :company_id)
+                """),
+                final_employee_data
+            )
+        
+        transaction.commit()
+        return len(final_employee_data)
     
-    # Prepare employee objects with proper company_id
-    db_employees = []
-    for employee in employees:
-        db_employee = Employee(
-            first_name=employee.first_name,
-            last_name=employee.last_name,
-            phone_number=employee.phone_number,
-            salary=employee.salary,
-            manager_id=employee.manager_id,
-            department_id=employee.department_id,
-            company_id=company_map[employee.company_name]
-        )
-        db_employees.append(db_employee)
-    
-    db.bulk_save_objects(db_employees)
-    db.commit()
-    return len(db_employees)
+    except Exception as e:
+        transaction.rollback()
+        raise e
